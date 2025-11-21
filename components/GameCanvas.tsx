@@ -13,6 +13,7 @@ import {
   LOOT_COLLECTION_RANGE,
   LOOT_DESPAWN_TIME
 } from '../constants';
+import { SoundManager } from '../utils/audio';
 
 interface GameCanvasProps {
   gameState: GameState;
@@ -23,6 +24,7 @@ interface GameCanvasProps {
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGameOver, playerState: initialPlayerState }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const soundManagerRef = useRef<SoundManager | null>(null);
   
   // Use state for window dimensions to handle resizing
   const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight });
@@ -57,6 +59,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
     shipRef.current = initialPlayerState;
     lootRef.current = [];
     particlesRef.current = [];
+    
+    // Init Audio
+    soundManagerRef.current = new SoundManager();
     
     // Generate Stars
     const stars = [];
@@ -144,12 +149,21 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
     }
     asteroidsRef.current = asteroids;
 
+    // Cleanup audio
+    return () => {
+      soundManagerRef.current?.stopThrust();
+      soundManagerRef.current?.stopLaser();
+    };
   }, [initialPlayerState]);
 
 
   // --- Input Listeners ---
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => { keysRef.current[e.code] = true; };
+    const handleKeyDown = (e: KeyboardEvent) => { 
+      keysRef.current[e.code] = true; 
+      // Resume audio context on first interaction if needed
+      soundManagerRef.current?.resume();
+    };
     const handleKeyUp = (e: KeyboardEvent) => { keysRef.current[e.code] = false; };
     const handleMouseMove = (e: MouseEvent) => {
       if(!canvasRef.current) return;
@@ -157,7 +171,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       mouseRef.current.x = e.clientX - rect.left;
       mouseRef.current.y = e.clientY - rect.top;
     };
-    const handleMouseDown = () => { mouseRef.current.isDown = true; };
+    const handleMouseDown = () => { 
+      mouseRef.current.isDown = true;
+      soundManagerRef.current?.resume();
+    };
     const handleMouseUp = () => { mouseRef.current.isDown = false; };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -203,6 +220,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
         ship.velocity.y += Math.sin(ship.rotation) * ship.shipConfig.acceleration;
         ship.currentFuel -= ship.shipConfig.thrustConsumptionRate;
         
+        // Play Thrust Sound
+        soundManagerRef.current?.startThrust();
+
         // Spawn thrust particles
         // Offset to rear of ship (approx -22 relative X)
         const exhaustOffset = 22;
@@ -219,6 +239,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
             color: '#fbbf24', // Amber
             size: 2
         });
+      } else {
+        // Stop Thrust Sound
+        soundManagerRef.current?.stopThrust();
       }
 
       // Friction/Space Drag (Newtonian-lite)
@@ -242,6 +265,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       } else {
           // Game Over Check
           if (Math.abs(ship.velocity.x) < 0.1 && Math.abs(ship.velocity.y) < 0.1) {
+              soundManagerRef.current?.stopLaser();
+              soundManagerRef.current?.stopThrust();
               onGameOver();
               return; // Stop loop
           }
@@ -276,6 +301,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           miningTarget.isHeating = true;
           miningTarget.health -= ship.shipConfig.miningPower;
           ship.currentFuel -= ship.shipConfig.thrustConsumptionRate * 0.5; // Laser uses fuel too
+          
+          // Play Laser Sound
+          soundManagerRef.current?.startLaser();
 
           // Spawn laser hit particles
           if (Math.random() > 0.5) {
@@ -293,6 +321,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
 
           if (miningTarget.health <= 0) {
               // Destroyed!
+              
+              // Play Explosion
+              soundManagerRef.current?.playExplosion();
+              
               const lootAmount = Math.floor(miningTarget.radius / 5); 
               
               // --- Spawn Loot Drop ---
@@ -338,6 +370,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
               // Remove asteroid
               asteroidsRef.current = asteroidsRef.current.filter(a => a !== miningTarget);
           }
+      } else {
+          // Stop Laser Sound
+          soundManagerRef.current?.stopLaser();
       }
       
       // --- Loot Logic ---
@@ -361,6 +396,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
                   // Collect
                   ship.cargo[loot.type] = (ship.cargo[loot.type] || 0) + loot.amount;
                   loot.life = 0; // Remove
+                  
+                  // Play Collect Sound
+                  soundManagerRef.current?.playCollect();
                   
                   // Visual Feedback (Floating Text)
                   particlesRef.current.push({
@@ -462,12 +500,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       // 1. Draw Stars (Parallax)
       starsRef.current.forEach(star => {
           // Parallax: Move stars based on depth
-          // Depth 0 = moves with camera (foreground), Depth 1 = fixed in space (bg)
-          // Here we used depth as "distance factor", so 1 is close? 
-          // Actually previous implementation: px = star.x + (cam.x * (1-depth))
-          // If depth is small (0.1), 1-depth is 0.9, moves a lot -> foreground?
-          // Let's stick to: star.x is world position.
-          
           const factor = (1 - star.depth); // how much it follows camera. 0 = locked to world.
           const px = star.x + (cameraRef.current.x * factor);
           const py = star.y + (cameraRef.current.y * factor);
@@ -830,9 +862,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           else ctx.fillText("REDUCE SPEED TO DOCK", width/2, height - 100);
       }
 
-      // Sync important state to React for overlay updates (throttled or just when pausing)
-      // Here we just keep refs.
-
       animationFrameId = requestAnimationFrame(loop);
     };
 
@@ -849,4 +878,3 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
     />
   );
 };
-    
