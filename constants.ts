@@ -1,3 +1,4 @@
+
 import { MineralType, ShipConfig, UpgradeCost } from './types';
 
 export const CANVAS_WIDTH = window.innerWidth;
@@ -8,6 +9,8 @@ export const FPS = 60;
 export const STATION_POSITION = { x: 0, y: 0 };
 export const STATION_RADIUS = 150;
 export const DOCKING_RANGE = 200;
+export const LOOT_COLLECTION_RANGE = 60;
+export const LOOT_DESPAWN_TIME = 1800; // 30 seconds at 60fps
 
 export const INITIAL_SHIP_CONFIG: ShipConfig = {
   maxFuel: 1000,

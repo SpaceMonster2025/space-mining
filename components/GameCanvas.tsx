@@ -1,5 +1,6 @@
+
 import React, { useRef, useEffect, useState } from 'react';
-import { GameState, PlayerState, Asteroid, Point, MineralType } from '../types';
+import { GameState, PlayerState, Asteroid, Point, MineralType, Particle, Loot } from '../types';
 import { 
   CANVAS_WIDTH, 
   CANVAS_HEIGHT, 
@@ -8,7 +9,9 @@ import {
   DOCKING_RANGE, 
   ASTEROID_SPAWN_RADIUS,
   WORLD_BOUNDS,
-  MINERAL_COLORS
+  MINERAL_COLORS,
+  LOOT_COLLECTION_RANGE,
+  LOOT_DESPAWN_TIME
 } from '../constants';
 
 interface GameCanvasProps {
@@ -20,14 +23,17 @@ interface GameCanvasProps {
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGameOver, playerState: initialPlayerState }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [hudState, setHudState] = useState<PlayerState | null>(null);
+  
+  // Use state for window dimensions to handle resizing
+  const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight });
 
   // Mutable game state refs to avoid re-renders during game loop
   const shipRef = useRef(initialPlayerState);
   const asteroidsRef = useRef<Asteroid[]>([]);
   const keysRef = useRef<{ [key: string]: boolean }>({});
   const mouseRef = useRef<{ x: number, y: number, isDown: boolean }>({ x: 0, y: 0, isDown: false });
-  const particlesRef = useRef<{x: number, y: number, vx: number, vy: number, life: number, maxLife: number, color: string}[]>([]);
+  const particlesRef = useRef<Particle[]>([]);
+  const lootRef = useRef<Loot[]>([]);
   
   // Camera position (centered on ship usually, but smoothed)
   const cameraRef = useRef({ x: 0, y: 0 });
@@ -35,16 +41,27 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
   // Stars for parallax
   const starsRef = useRef<{x: number, y: number, size: number, depth: number}[]>([]);
 
+  // --- Resize Listener ---
+  useEffect(() => {
+    const handleResize = () => {
+      setDimensions({ width: window.innerWidth, height: window.innerHeight });
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   // --- Initialization ---
   useEffect(() => {
     shipRef.current = initialPlayerState;
+    lootRef.current = [];
+    particlesRef.current = [];
     
     // Generate Stars
     const stars = [];
     for(let i=0; i<200; i++) {
       stars.push({
-        x: (Math.random() - 0.5) * CANVAS_WIDTH * 4,
-        y: (Math.random() - 0.5) * CANVAS_HEIGHT * 4,
+        x: (Math.random() - 0.5) * WORLD_BOUNDS, // Use world bounds for stars, not screen
+        y: (Math.random() - 0.5) * WORLD_BOUNDS,
         size: Math.random() * 2,
         depth: 0.2 + Math.random() * 0.8
       });
@@ -157,14 +174,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
         ship.currentFuel -= ship.shipConfig.thrustConsumptionRate;
         
         // Spawn thrust particles
+        // Offset to rear of ship (approx -22 relative X)
+        const exhaustOffset = 22;
+        const exX = ship.position.x - Math.cos(ship.rotation) * exhaustOffset;
+        const exY = ship.position.y - Math.sin(ship.rotation) * exhaustOffset;
+
         particlesRef.current.push({
-            x: ship.position.x - Math.cos(ship.rotation) * 15,
-            y: ship.position.y - Math.sin(ship.rotation) * 15,
-            vx: ship.velocity.x - Math.cos(ship.rotation) * 2 + (Math.random()-0.5),
-            vy: ship.velocity.y - Math.sin(ship.rotation) * 2 + (Math.random()-0.5),
+            x: exX,
+            y: exY,
+            vx: ship.velocity.x - Math.cos(ship.rotation) * 3 + (Math.random()-0.5),
+            vy: ship.velocity.y - Math.sin(ship.rotation) * 3 + (Math.random()-0.5),
             life: 20,
             maxLife: 20,
-            color: '#fbbf24' // Amber
+            color: '#fbbf24', // Amber
+            size: 2
         });
       }
 
@@ -233,40 +256,110 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
                 vy: (Math.random()-0.5)*3,
                 life: 15,
                 maxLife: 15,
-                color: '#ffffff'
+                color: '#ffffff',
+                size: 1
              });
           }
 
           if (miningTarget.health <= 0) {
               // Destroyed!
-              const lootAmount = Math.floor(miningTarget.radius / 5); // simplified loot math
-              const currentCargo = Object.values(ship.cargo).reduce((a,b) => a+b, 0);
+              const lootAmount = Math.floor(miningTarget.radius / 5); 
               
-              if (currentCargo < ship.shipConfig.maxCargo) {
-                   ship.cargo[miningTarget.type] = (ship.cargo[miningTarget.type] || 0) + lootAmount;
-                   // Clamp if overflow (simplified, just takes it all or stops at max)
-                   if (Object.values(ship.cargo).reduce((a,b) => a+b, 0) > ship.shipConfig.maxCargo) {
-                       // Ideally handle partial add, but this is fine for now
-                   }
-              }
-              
-              // Explosion particles
-              for(let k=0; k<10; k++) {
+              // --- Spawn Loot Drop ---
+              lootRef.current.push({
+                  id: `loot-${Date.now()}`,
+                  x: miningTarget.x,
+                  y: miningTarget.y,
+                  vx: (Math.random() - 0.5) * 1.5,
+                  vy: (Math.random() - 0.5) * 1.5,
+                  type: miningTarget.type,
+                  amount: lootAmount,
+                  life: LOOT_DESPAWN_TIME
+              });
+
+              // --- Shatter Effect ---
+              // Create "chunks" (larger debris)
+              for(let k=0; k<8; k++) {
                   particlesRef.current.push({
-                    x: miningTarget.x,
-                    y: miningTarget.y,
-                    vx: (Math.random()-0.5)*5,
-                    vy: (Math.random()-0.5)*5,
-                    life: 40,
-                    maxLife: 40,
-                    color: MINERAL_COLORS[miningTarget.type]
+                    x: miningTarget.x + (Math.random()-0.5) * miningTarget.radius * 0.5,
+                    y: miningTarget.y + (Math.random()-0.5) * miningTarget.radius * 0.5,
+                    vx: (Math.random()-0.5)*3,
+                    vy: (Math.random()-0.5)*3,
+                    life: 60 + Math.random() * 40,
+                    maxLife: 100,
+                    color: MINERAL_COLORS[miningTarget.type],
+                    size: 3 + Math.random() * 4 // Chunkier
                   });
               }
+              // Create "dust" (smaller particles)
+              for(let k=0; k<15; k++) {
+                particlesRef.current.push({
+                  x: miningTarget.x + (Math.random()-0.5) * miningTarget.radius,
+                  y: miningTarget.y + (Math.random()-0.5) * miningTarget.radius,
+                  vx: (Math.random()-0.5)*6,
+                  vy: (Math.random()-0.5)*6,
+                  life: 30 + Math.random() * 20,
+                  maxLife: 50,
+                  color: MINERAL_COLORS[miningTarget.type],
+                  size: 1 + Math.random() * 2
+                });
+            }
 
               // Remove asteroid
               asteroidsRef.current = asteroidsRef.current.filter(a => a !== miningTarget);
           }
       }
+      
+      // --- Loot Logic ---
+      lootRef.current.forEach(loot => {
+          // Physics (drag)
+          loot.x += loot.vx;
+          loot.y += loot.vy;
+          loot.vx *= 0.95;
+          loot.vy *= 0.95;
+          loot.life--;
+          
+          // Collision with ship
+          const dx = ship.position.x - loot.x;
+          const dy = ship.position.y - loot.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          
+          if (dist < LOOT_COLLECTION_RANGE) {
+              const currentCargoTotal = Object.values(ship.cargo).reduce((a,b) => a+b, 0);
+              
+              if (currentCargoTotal + loot.amount <= ship.shipConfig.maxCargo) {
+                  // Collect
+                  ship.cargo[loot.type] = (ship.cargo[loot.type] || 0) + loot.amount;
+                  loot.life = 0; // Remove
+                  
+                  // Visual Feedback (Floating Text)
+                  particlesRef.current.push({
+                      x: loot.x,
+                      y: loot.y,
+                      vx: 0, vy: -1,
+                      life: 60, maxLife: 60,
+                      color: '#aaffaa',
+                      size: 0,
+                      text: `+${loot.amount} ${loot.type}`
+                  });
+              } else {
+                  // Full
+                  // Only show warning occasionally to avoid spam (using randomness as a cheap throttle)
+                  if (Math.random() < 0.05) {
+                      particlesRef.current.push({
+                          x: loot.x,
+                          y: loot.y,
+                          vx: 0, vy: -0.5,
+                          life: 40, maxLife: 40,
+                          color: '#ef4444',
+                          size: 0,
+                          text: 'CARGO FULL'
+                      });
+                  }
+              }
+          }
+      });
+      lootRef.current = lootRef.current.filter(l => l.life > 0);
 
       // Docking Logic
       const distToStation = Math.sqrt(ship.position.x**2 + ship.position.y**2);
@@ -296,7 +389,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           const px = star.x + (cameraRef.current.x * (1 - star.depth));
           const py = star.y + (cameraRef.current.y * (1 - star.depth));
           
-          // Wrap stars (infinite field illusion)
           // Simplified: just draw fixed stars relative to world for now to avoid complex wrapping logic bugs
           ctx.globalAlpha = Math.random() * 0.8 + 0.2;
           ctx.beginPath();
@@ -357,7 +449,78 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           ctx.globalAlpha = 1.0;
 
           ctx.restore();
+
+          // Health Bar
+          if (ast.health < ast.maxHealth) {
+              const barW = 30;
+              const barH = 4;
+              const barX = ast.x - barW / 2;
+              const barY = ast.y - ast.radius - 12;
+
+              // Reset shadows for clean UI, save/restore to not affect next loop
+              ctx.save(); 
+              ctx.shadowBlur = 0;
+              
+              // Background
+              ctx.fillStyle = '#000000';
+              ctx.fillRect(barX, barY, barW, barH);
+              
+              // Fill
+              const pct = Math.max(0, ast.health / ast.maxHealth);
+              ctx.fillStyle = pct < 0.3 ? '#ef4444' : '#22c55e';
+              ctx.fillRect(barX, barY, barW * pct, barH);
+
+              // Border
+              ctx.strokeStyle = '#ffffff';
+              ctx.lineWidth = 1;
+              ctx.strokeRect(barX, barY, barW, barH);
+              ctx.restore();
+          }
+
           ast.isHeating = false; // Reset flag
+      });
+      
+      // Draw Loot
+      lootRef.current.forEach(loot => {
+          const color = MINERAL_COLORS[loot.type];
+          ctx.fillStyle = color;
+          ctx.shadowColor = color;
+          ctx.shadowBlur = 15;
+          
+          // Draw Element Shape
+          ctx.save();
+          ctx.translate(loot.x, loot.y);
+          
+          // Shape based on type for visual variety
+          ctx.beginPath();
+          if (loot.type === MineralType.IRON) {
+              // Square
+              ctx.fillRect(-4, -4, 8, 8);
+          } else if (loot.type === MineralType.SILICON) {
+              // Triangle
+              ctx.moveTo(0, -6); ctx.lineTo(6, 6); ctx.lineTo(-6, 6); ctx.fill();
+          } else if (loot.type === MineralType.GOLD) {
+              // Diamond
+              ctx.moveTo(0, -6); ctx.lineTo(6, 0); ctx.lineTo(0, 6); ctx.lineTo(-6, 0); ctx.fill();
+          } else {
+              // Hexagon (Kronos)
+              for(let i=0; i<6; i++) {
+                  const ang = i * Math.PI/3;
+                  const lx = Math.cos(ang)*5;
+                  const ly = Math.sin(ang)*5;
+                  if (i===0) ctx.moveTo(lx, ly); else ctx.lineTo(lx, ly);
+              }
+              ctx.fill();
+          }
+          
+          // Text Label
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = '#ffffff';
+          ctx.font = '10px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(`${loot.type} [${loot.amount}]`, 0, -12);
+          
+          ctx.restore();
       });
 
       // Draw Particles
@@ -368,7 +531,19 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           
           ctx.fillStyle = p.color;
           ctx.globalAlpha = p.life / p.maxLife;
-          ctx.fillRect(p.x, p.y, 2, 2);
+          
+          if (p.text) {
+              // Text Particle (Floating Text)
+              ctx.font = '12px monospace';
+              ctx.textAlign = 'center';
+              ctx.shadowColor = 'black';
+              ctx.shadowBlur = 2;
+              ctx.fillText(p.text, p.x, p.y);
+              ctx.shadowBlur = 0;
+          } else {
+              // Standard Shape Particle
+              ctx.fillRect(p.x, p.y, p.size, p.size);
+          }
       });
       particlesRef.current = particlesRef.current.filter(p => p.life > 0);
       ctx.globalAlpha = 1.0;
@@ -380,14 +555,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           ctx.shadowColor = '#00ffff';
           ctx.strokeStyle = '#00ffff';
           ctx.lineWidth = 2 + Math.random() * 2;
+          
+          // Laser start point (Nose of ship)
+          const noseOffset = 30;
+          const lx = ship.position.x + Math.cos(ship.rotation) * noseOffset;
+          const ly = ship.position.y + Math.sin(ship.rotation) * noseOffset;
+
           ctx.beginPath();
-          ctx.moveTo(ship.position.x, ship.position.y);
+          ctx.moveTo(lx, ly);
           ctx.lineTo(miningTarget.x, miningTarget.y);
           ctx.stroke();
           
           // Source flare
           ctx.beginPath();
-          ctx.arc(ship.position.x, ship.position.y, 5, 0, Math.PI*2);
+          ctx.arc(lx, ly, 5, 0, Math.PI*2);
           ctx.fillStyle = '#fff';
           ctx.fill();
       }
@@ -402,23 +583,91 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       ctx.strokeStyle = '#ffffff'; // Main Hull
       ctx.lineWidth = 2;
       
+      // --- Retro Rocket Design ---
+      
+      // 1. Main Body (Elongated Cylinder)
       ctx.beginPath();
-      // Saucer shape
-      ctx.ellipse(0, 0, 20, 15, 0, 0, Math.PI * 2);
-      ctx.moveTo(0, -15);
-      ctx.lineTo(0, -25); // Cockpit spike
+      // Top edge
+      ctx.moveTo(-10, -6);
+      ctx.lineTo(10, -6);
+      // Bottom edge
+      ctx.moveTo(-10, 6);
+      ctx.lineTo(10, 6);
       ctx.stroke();
+      
+      // 2. Nose Cone (Pointy, delineated)
+      ctx.beginPath();
+      ctx.moveTo(10, -6);
+      // Curve to a sharp point
+      ctx.quadraticCurveTo(25, 0, 30, 0);
+      ctx.quadraticCurveTo(25, 0, 10, 6);
+      // Delineation line
+      ctx.moveTo(10, -6);
+      ctx.lineTo(10, 6);
+      ctx.stroke();
+      
+      // 3. Aft Section / Thrust Cone
+      ctx.beginPath();
+      ctx.moveTo(-10, -6);
+      ctx.lineTo(-20, -10); // Flared bell top
+      ctx.lineTo(-20, 10);  // Flared bell bottom
+      ctx.lineTo(-10, 6);
+      // Delineation line
+      ctx.moveTo(-10, -6);
+      ctx.lineTo(-10, 6);
+      // Engine grating/detail
+      ctx.moveTo(-20, -10);
+      ctx.lineTo(-20, 10);
+      ctx.stroke();
+
+      // 4. Fins (Swept back wings)
+      ctx.beginPath();
+      // Top Wing
+      ctx.moveTo(-5, -6);
+      ctx.lineTo(-15, -18); // Wing tip
+      ctx.lineTo(-5, -10); // Trailing edge connection? Or just back to body
+      ctx.lineTo(0, -6);
+      // Bottom Wing
+      ctx.moveTo(-5, 6);
+      ctx.lineTo(-15, 18);
+      ctx.lineTo(-5, 10);
+      ctx.lineTo(0, 6);
+      ctx.stroke();
+      
+      // 5. Portholes (Little circles)
+      ctx.fillStyle = '#000'; // Mask background
+      // Center porthole
+      ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+      // Front porthole
+      ctx.beginPath(); ctx.arc(6, 0, 2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+      // Rear porthole
+      ctx.beginPath(); ctx.arc(-6, 0, 2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+      
+      // Add "Glass" glow to portholes
+      ctx.fillStyle = '#aaffaa';
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath(); ctx.arc(0, 0, 1.5, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(6, 0, 1, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(-6, 0, 1, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 1.0;
 
       // Engine flare (if thrusting)
       if (isThrusting) {
           ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 3;
+          ctx.shadowColor = '#fbbf24';
+          ctx.shadowBlur = 15;
           ctx.beginPath();
-          ctx.moveTo(-10, 0);
-          ctx.lineTo(-25 - Math.random()*10, 0);
-          ctx.moveTo(-10, 5);
-          ctx.lineTo(-20 - Math.random()*5, 5);
-          ctx.moveTo(-10, -5);
-          ctx.lineTo(-20 - Math.random()*5, -5);
+          // Main jet
+          ctx.moveTo(-22, 0); // Start inside bell
+          ctx.lineTo(-45 - Math.random()*15, 0);
+          
+          // Side jets
+          ctx.moveTo(-21, -4);
+          ctx.lineTo(-35 - Math.random()*10, -6);
+          ctx.moveTo(-21, 4);
+          ctx.lineTo(-35 - Math.random()*10, 6);
+          
           ctx.stroke();
       }
 
@@ -506,13 +755,13 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
 
     animationFrameId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [gameState, onDock, onGameOver]);
+  }, [gameState, onDock, onGameOver, dimensions]); // Added dimensions to dependency
 
   return (
     <canvas 
       ref={canvasRef} 
-      width={CANVAS_WIDTH} 
-      height={CANVAS_HEIGHT} 
+      width={dimensions.width} 
+      height={dimensions.height} 
       className="block bg-black cursor-crosshair"
     />
   );

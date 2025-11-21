@@ -1,3 +1,4 @@
+
 export enum GameState {
   START = 'START',
   PLAYING = 'PLAYING',
@@ -34,7 +35,7 @@ export interface Asteroid {
 }
 
 export interface Particle {
-  id: string;
+  id?: string;
   x: number;
   y: number;
   vx: number;
@@ -42,6 +43,19 @@ export interface Particle {
   life: number;
   maxLife: number;
   color: string;
+  size: number;
+  text?: string; // For floating text effects
+}
+
+export interface Loot {
+  id: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  type: MineralType;
+  amount: number;
+  life: number;
 }
 
 export interface ShipConfig {

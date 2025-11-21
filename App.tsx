@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { GameCanvas } from './components/GameCanvas';
 import { StationInterface } from './components/StationInterface';
@@ -39,6 +40,16 @@ const App: React.FC = () => {
       position: { x: STATION_POSITION.x, y: STATION_POSITION.y + 220 },
       velocity: { x: 0, y: 1 } // Little push out
     }));
+    setGameState(GameState.PLAYING);
+  };
+
+  const handleStartGame = () => {
+    // Attempt to go fullscreen
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(err => {
+        console.warn("Error attempting to enable full-screen mode:", err);
+      });
+    }
     setGameState(GameState.PLAYING);
   };
 
@@ -93,7 +104,7 @@ const App: React.FC = () => {
               <p className="text-sm text-green-700">CONTROLS: WASD + MOUSE</p>
             </div>
             <button 
-              onClick={() => setGameState(GameState.PLAYING)}
+              onClick={handleStartGame}
               className="px-8 py-3 bg-green-600 text-black font-bold text-2xl rounded hover:bg-green-400 transition-all hover:scale-105 shadow-[0_0_15px_#00ff00]"
             >
               INITIATE LAUNCH SEQUENCE
