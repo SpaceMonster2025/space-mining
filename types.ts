@@ -58,6 +58,20 @@ export interface Loot {
   life: number;
 }
 
+export interface Alien {
+  id: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  hp: number;
+  maxHp: number;
+  stolenCargo: { [key in MineralType]?: number };
+  state: 'CHASING' | 'DRAINING' | 'FLEEING';
+  drainTimer: number;
+  wobbleAngle: number;
+}
+
 export interface ShipConfig {
   maxFuel: number;
   fuelConsumptionRate: number; // Per frame idle

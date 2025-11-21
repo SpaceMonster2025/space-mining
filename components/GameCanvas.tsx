@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState } from 'react';
-import { GameState, PlayerState, Asteroid, Point, MineralType, Particle, Loot } from '../types';
+import { GameState, PlayerState, Asteroid, Point, MineralType, Particle, Loot, Alien } from '../types';
 import { 
   CANVAS_WIDTH, 
   CANVAS_HEIGHT, 
@@ -11,7 +11,8 @@ import {
   WORLD_BOUNDS,
   MINERAL_COLORS,
   LOOT_COLLECTION_RANGE,
-  LOOT_DESPAWN_TIME
+  LOOT_DESPAWN_TIME,
+  ALIEN_CONFIG
 } from '../constants';
 import { SoundManager } from '../utils/audio';
 
@@ -32,6 +33,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
   // Mutable game state refs to avoid re-renders during game loop
   const shipRef = useRef(initialPlayerState);
   const asteroidsRef = useRef<Asteroid[]>([]);
+  const alienRef = useRef<Alien | null>(null);
   const keysRef = useRef<{ [key: string]: boolean }>({});
   const mouseRef = useRef<{ x: number, y: number, isDown: boolean }>({ x: 0, y: 0, isDown: false });
   const particlesRef = useRef<Particle[]>([]);
@@ -60,6 +62,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
     shipRef.current = initialPlayerState;
     lootRef.current = [];
     particlesRef.current = [];
+    alienRef.current = null;
     shakeRef.current = 0;
     
     // Init Audio
@@ -155,6 +158,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
     return () => {
       soundManagerRef.current?.stopThrust();
       soundManagerRef.current?.stopLaser();
+      soundManagerRef.current?.stopAlienHum();
     };
   }, [initialPlayerState]);
 
@@ -275,6 +279,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           if (Math.abs(ship.velocity.x) < 0.1 && Math.abs(ship.velocity.y) < 0.1) {
               soundManagerRef.current?.stopLaser();
               soundManagerRef.current?.stopThrust();
+              soundManagerRef.current?.stopAlienHum();
               onGameOver();
               return; // Stop loop
           }
@@ -284,39 +289,213 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       cameraRef.current.x = ship.position.x - width / 2;
       cameraRef.current.y = ship.position.y - height / 2;
 
-      // Mining Logic
+      // --- Alien Logic ---
+      // Spawn Alien
+      if (!alienRef.current) {
+          if (Math.random() < ALIEN_CONFIG.SPAWN_RATE) {
+              const angle = Math.random() * Math.PI * 2;
+              const dist = Math.max(width, height) * 1.2; // Spawn outside view
+              alienRef.current = {
+                  id: `alien-${Date.now()}`,
+                  x: ship.position.x + Math.cos(angle) * dist,
+                  y: ship.position.y + Math.sin(angle) * dist,
+                  vx: 0, vy: 0,
+                  hp: ALIEN_CONFIG.HP,
+                  maxHp: ALIEN_CONFIG.HP,
+                  stolenCargo: {},
+                  state: 'CHASING',
+                  drainTimer: 0,
+                  wobbleAngle: 0
+              };
+              soundManagerRef.current?.startAlienHum();
+          }
+      }
+
+      // Update Alien
+      if (alienRef.current) {
+          const alien = alienRef.current;
+          const dx = ship.position.x - alien.x;
+          const dy = ship.position.y - alien.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          
+          alien.wobbleAngle += 0.1;
+
+          // AI Movement
+          if (dist > ALIEN_CONFIG.DRAIN_RANGE * 0.7) {
+              // Chase
+              const angle = Math.atan2(dy, dx);
+              alien.vx += Math.cos(angle) * 0.1;
+              alien.vy += Math.sin(angle) * 0.1;
+              alien.state = 'CHASING';
+          } else {
+              // Brake/Hover
+              alien.vx *= 0.95;
+              alien.vy *= 0.95;
+              alien.state = 'DRAINING';
+          }
+
+          // Speed Cap
+          const alienSpeed = Math.sqrt(alien.vx**2 + alien.vy**2);
+          if (alienSpeed > ALIEN_CONFIG.SPEED) {
+              alien.vx = (alien.vx / alienSpeed) * ALIEN_CONFIG.SPEED;
+              alien.vy = (alien.vy / alienSpeed) * ALIEN_CONFIG.SPEED;
+          }
+
+          alien.x += alien.vx;
+          alien.y += alien.vy;
+
+          // Vampiric Drain
+          if (alien.state === 'DRAINING' && dist < ALIEN_CONFIG.DRAIN_RANGE) {
+              alien.drainTimer++;
+              if (alien.drainTimer >= ALIEN_CONFIG.DRAIN_INTERVAL) {
+                  // Steal Cargo
+                  const availableTypes = (Object.keys(ship.cargo) as MineralType[])
+                      .filter(t => ship.cargo[t] > 0);
+                  
+                  if (availableTypes.length > 0) {
+                      const typeToSteal = availableTypes[Math.floor(Math.random() * availableTypes.length)];
+                      
+                      // Transfer
+                      ship.cargo[typeToSteal]--;
+                      alien.stolenCargo[typeToSteal] = (alien.stolenCargo[typeToSteal] || 0) + 1;
+                      
+                      soundManagerRef.current?.playAlienZap();
+                      
+                      // Visual text on ship
+                      particlesRef.current.push({
+                          x: ship.position.x,
+                          y: ship.position.y - 20,
+                          vx: 0, vy: -1,
+                          life: 60, maxLife: 60,
+                          color: '#ef4444', // Red
+                          size: 0,
+                          text: `-1 ${typeToSteal}`
+                      });
+                  }
+                  alien.drainTimer = 0;
+              }
+          }
+      } else {
+        soundManagerRef.current?.stopAlienHum();
+      }
+
+
+      // Mining & Combat Logic
       let miningTarget: Asteroid | null = null;
+      let attackingAlien = false;
+
       const worldMouseX = mouseRef.current.x + cameraRef.current.x;
       const worldMouseY = mouseRef.current.y + cameraRef.current.y;
 
       if (mouseRef.current.isDown && ship.currentFuel > 0) {
-          // Find asteroid under mouse
-          for (let ast of asteroidsRef.current) {
-              const dx = worldMouseX - ast.x;
-              const dy = worldMouseY - ast.y;
-              if (dx*dx + dy*dy < ast.radius * ast.radius) {
-                  // Check range
-                  const distToShip = Math.sqrt((ast.x - ship.position.x)**2 + (ast.y - ship.position.y)**2);
-                  if (distToShip <= ship.shipConfig.miningRange) {
-                      miningTarget = ast;
-                      break; // Only mine one at a time
+          const noseOffset = 30;
+          const lx = ship.position.x + Math.cos(ship.rotation) * noseOffset;
+          const ly = ship.position.y + Math.sin(ship.rotation) * noseOffset;
+
+          // 1. Check Alien Hit
+          if (alienRef.current) {
+              const alien = alienRef.current;
+              // Simple Line to Circle collision check
+              // Vector from laser start to alien center
+              const ax = alien.x - lx;
+              const ay = alien.y - ly;
+              const alienDist = Math.sqrt(ax*ax + ay*ay);
+              
+              // Check if mouse is roughly over alien (aim assist)
+              const mouseDx = worldMouseX - alien.x;
+              const mouseDy = worldMouseY - alien.y;
+              const mouseDist = Math.sqrt(mouseDx*mouseDx + mouseDy*mouseDy);
+
+              if (mouseDist < 50 && alienDist < ship.shipConfig.miningRange) {
+                  attackingAlien = true;
+                  alien.hp -= ship.shipConfig.miningPower;
+                  ship.currentFuel -= ship.shipConfig.thrustConsumptionRate * 0.5;
+                  
+                  soundManagerRef.current?.startLaser();
+                  shakeRef.current = Math.max(shakeRef.current, 2);
+
+                   // Hit particles
+                   if (Math.random() > 0.5) {
+                    particlesRef.current.push({
+                        x: alien.x + (Math.random()-0.5)*30,
+                        y: alien.y + (Math.random()-0.5)*30,
+                        vx: (Math.random()-0.5)*5,
+                        vy: (Math.random()-0.5)*5,
+                        life: 20,
+                        maxLife: 20,
+                        color: ALIEN_CONFIG.COLOR_LIGHTS,
+                        size: 2
+                    });
+                  }
+
+                  if (alien.hp <= 0) {
+                      // Alien Destroyed
+                      soundManagerRef.current?.playExplosion();
+                      soundManagerRef.current?.stopAlienHum();
+                      shakeRef.current = 20;
+
+                      // Drop stolen cargo
+                      Object.keys(alien.stolenCargo).forEach(key => {
+                          const type = key as MineralType;
+                          const amount = alien.stolenCargo[type] || 0;
+                          if (amount > 0) {
+                              lootRef.current.push({
+                                  id: `loot-alien-${Date.now()}-${type}`,
+                                  x: alien.x,
+                                  y: alien.y,
+                                  vx: (Math.random() - 0.5) * 3,
+                                  vy: (Math.random() - 0.5) * 3,
+                                  type: type,
+                                  amount: amount,
+                                  life: LOOT_DESPAWN_TIME
+                              });
+                          }
+                      });
+
+                      // Explosion Particles
+                      for(let k=0; k<30; k++) {
+                        particlesRef.current.push({
+                          x: alien.x,
+                          y: alien.y,
+                          vx: (Math.random()-0.5)*8,
+                          vy: (Math.random()-0.5)*8,
+                          life: 40 + Math.random() * 30,
+                          maxLife: 70,
+                          color: Math.random() > 0.5 ? ALIEN_CONFIG.COLOR_BODY : ALIEN_CONFIG.COLOR_LIGHTS,
+                          size: 2 + Math.random() * 3
+                        });
+                      }
+
+                      alienRef.current = null;
                   }
               }
           }
+
+          // 2. Check Asteroids if not attacking alien
+          if (!attackingAlien) {
+            for (let ast of asteroidsRef.current) {
+                const dx = worldMouseX - ast.x;
+                const dy = worldMouseY - ast.y;
+                if (dx*dx + dy*dy < ast.radius * ast.radius) {
+                    // Check range
+                    const distToShip = Math.sqrt((ast.x - ship.position.x)**2 + (ast.y - ship.position.y)**2);
+                    if (distToShip <= ship.shipConfig.miningRange) {
+                        miningTarget = ast;
+                        break; // Only mine one at a time
+                    }
+                }
+            }
+          }
       }
 
+      // Logic for Asteroid Mining (Copied/Refined from previous)
       if (miningTarget) {
           miningTarget.isHeating = true;
           miningTarget.health -= ship.shipConfig.miningPower;
-          ship.currentFuel -= ship.shipConfig.thrustConsumptionRate * 0.5; // Laser uses fuel too
-          
-          // Play Laser Sound
+          ship.currentFuel -= ship.shipConfig.thrustConsumptionRate * 0.5;
           soundManagerRef.current?.startLaser();
-
-          // Apply continuous small shake while mining
           shakeRef.current = Math.max(shakeRef.current, 2);
 
-          // Spawn laser hit particles
           if (Math.random() > 0.5) {
              particlesRef.current.push({
                 x: miningTarget.x + (Math.random()-0.5)*20,
@@ -331,17 +510,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           }
 
           if (miningTarget.health <= 0) {
-              // Destroyed!
-              
-              // Play Explosion
               soundManagerRef.current?.playExplosion();
-              
-              // Trigger big shake
               shakeRef.current = 15;
-              
               const lootAmount = Math.floor(miningTarget.radius / 5); 
-              
-              // --- Spawn Loot Drop ---
               lootRef.current.push({
                   id: `loot-${Date.now()}`,
                   x: miningTarget.x,
@@ -352,9 +523,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
                   amount: lootAmount,
                   life: LOOT_DESPAWN_TIME
               });
-
-              // --- Shatter Effect ---
-              // Create "chunks" (larger debris)
+              // Shatter effects...
               for(let k=0; k<8; k++) {
                   particlesRef.current.push({
                     x: miningTarget.x + (Math.random()-0.5) * miningTarget.radius * 0.5,
@@ -364,10 +533,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
                     life: 60 + Math.random() * 40,
                     maxLife: 100,
                     color: MINERAL_COLORS[miningTarget.type],
-                    size: 3 + Math.random() * 4 // Chunkier
+                    size: 3 + Math.random() * 4 
                   });
               }
-              // Create "dust" (smaller particles)
               for(let k=0; k<15; k++) {
                 particlesRef.current.push({
                   x: miningTarget.x + (Math.random()-0.5) * miningTarget.radius,
@@ -380,12 +548,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
                   size: 1 + Math.random() * 2
                 });
             }
-
-              // Remove asteroid
-              asteroidsRef.current = asteroidsRef.current.filter(a => a !== miningTarget);
+            asteroidsRef.current = asteroidsRef.current.filter(a => a !== miningTarget);
           }
-      } else {
-          // Stop Laser Sound
+      } 
+      
+      if (!miningTarget && !attackingAlien) {
           soundManagerRef.current?.stopLaser();
       }
       
@@ -426,7 +593,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
                   });
               } else {
                   // Full
-                  // Only show warning occasionally to avoid spam (using randomness as a cheap throttle)
                   if (Math.random() < 0.05) {
                       particlesRef.current.push({
                           x: loot.x,
@@ -446,8 +612,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       // Docking Logic
       const distToStation = Math.sqrt(ship.position.x**2 + ship.position.y**2);
       if (distToStation < DOCKING_RANGE && speed < 2) {
-          // Show docking hint?
-          // If stopped, dock
           if (speed < 0.5) {
               onDock(ship);
               return;
@@ -470,14 +634,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
 
       // 0. Draw Deep Background (Nebulas)
       nebulasRef.current.forEach(neb => {
-        // Deepest parallax
         const px = neb.x + (cameraRef.current.x * neb.depth);
         const py = neb.y + (cameraRef.current.y * neb.depth);
-
         const gradient = ctx.createRadialGradient(px, py, 0, px, py, neb.size);
         gradient.addColorStop(0, neb.color);
         gradient.addColorStop(1, 'rgba(0,0,0,0)');
-        
         ctx.fillStyle = gradient;
         ctx.beginPath();
         ctx.arc(px, py, neb.size, 0, Math.PI*2);
@@ -488,17 +649,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       galaxiesRef.current.forEach(gal => {
         const px = gal.x + (cameraRef.current.x * gal.depth);
         const py = gal.y + (cameraRef.current.y * gal.depth);
-
         ctx.save();
         ctx.translate(px, py);
         ctx.rotate(gal.rotation);
         ctx.strokeStyle = gal.color;
         ctx.lineWidth = 1.5;
-        ctx.globalAlpha = 0.3; // Faint
-
-        // Draw simple wireframe spirals
+        ctx.globalAlpha = 0.3; 
         for(let arm = 0; arm < 2; arm++) {
-          ctx.rotate(Math.PI); // Rotate 180 for next arm
+          ctx.rotate(Math.PI); 
           ctx.beginPath();
           for(let t = 0; t < 20; t++) {
             const r = t * (gal.size / 20);
@@ -510,18 +668,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           }
           ctx.stroke();
         }
-        
         ctx.restore();
       });
       ctx.globalAlpha = 1.0;
 
-      // 1. Draw Stars (Parallax)
+      // 1. Draw Stars
       starsRef.current.forEach(star => {
-          // Parallax: Move stars based on depth
-          const factor = (1 - star.depth); // how much it follows camera. 0 = locked to world.
+          const factor = (1 - star.depth);
           const px = star.x + (cameraRef.current.x * factor);
           const py = star.y + (cameraRef.current.y * factor);
-          
           ctx.globalAlpha = Math.random() * 0.5 + 0.3;
           ctx.fillStyle = '#ffffff';
           ctx.beginPath();
@@ -538,7 +693,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       ctx.beginPath();
       ctx.arc(STATION_POSITION.x, STATION_POSITION.y, STATION_RADIUS, 0, Math.PI*2);
       ctx.stroke();
-      // Station details
       ctx.beginPath();
       ctx.arc(STATION_POSITION.x, STATION_POSITION.y, STATION_RADIUS * 0.4, 0, Math.PI*2);
       ctx.stroke();
@@ -550,21 +704,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       // Draw Asteroids
       asteroidsRef.current.forEach(ast => {
           ast.rotation += ast.rotationSpeed;
-          
           ctx.shadowColor = ast.isHeating ? '#ff0000' : MINERAL_COLORS[ast.type];
           ctx.shadowBlur = ast.isHeating ? 20 : 5;
           ctx.strokeStyle = ast.isHeating ? '#ffffff' : MINERAL_COLORS[ast.type];
           ctx.fillStyle = '#000000';
           
           if (ast.isHeating) {
-              // Vibrate
               ctx.save();
               ctx.translate(ast.x + (Math.random()-0.5)*2, ast.y + (Math.random()-0.5)*2);
           } else {
               ctx.save();
               ctx.translate(ast.x, ast.y);
           }
-          
           ctx.rotate(ast.rotation);
           ctx.beginPath();
           ast.vertices.forEach((p, i) => {
@@ -574,13 +725,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           ctx.closePath();
           ctx.stroke();
           ctx.fill();
-
-          // Core glow
           ctx.fillStyle = ctx.shadowColor;
           ctx.globalAlpha = 0.2;
           ctx.fill();
           ctx.globalAlpha = 1.0;
-
           ctx.restore();
 
           // Health Bar
@@ -589,54 +737,121 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
               const barH = 4;
               const barX = ast.x - barW / 2;
               const barY = ast.y - ast.radius - 12;
-
-              // Reset shadows for clean UI, save/restore to not affect next loop
               ctx.save(); 
               ctx.shadowBlur = 0;
-              
-              // Background
               ctx.fillStyle = '#000000';
               ctx.fillRect(barX, barY, barW, barH);
-              
-              // Fill
               const pct = Math.max(0, ast.health / ast.maxHealth);
               ctx.fillStyle = pct < 0.3 ? '#ef4444' : '#22c55e';
               ctx.fillRect(barX, barY, barW * pct, barH);
-
-              // Border
               ctx.strokeStyle = '#ffffff';
               ctx.lineWidth = 1;
               ctx.strokeRect(barX, barY, barW, barH);
               ctx.restore();
           }
-
-          ast.isHeating = false; // Reset flag
+          ast.isHeating = false; 
       });
-      
+
+      // Draw Alien
+      if (alienRef.current) {
+          const alien = alienRef.current;
+          ctx.save();
+          ctx.translate(alien.x, alien.y + Math.sin(alien.wobbleAngle)*5);
+          
+          // Lightning Effect
+          if (alien.state === 'DRAINING' && Math.random() > 0.2) {
+              ctx.beginPath();
+              ctx.moveTo(0, 0);
+              // Jagged line to ship
+              const dx = ship.position.x - alien.x;
+              const dy = ship.position.y - alien.y;
+              const dist = Math.sqrt(dx*dx + dy*dy);
+              const segments = 5;
+              for(let i=1; i<=segments; i++) {
+                  const t = i/segments;
+                  const jx = dx*t + (Math.random()-0.5)*20;
+                  const jy = dy*t + (Math.random()-0.5)*20;
+                  ctx.lineTo(jx, jy);
+              }
+              ctx.shadowColor = ALIEN_CONFIG.COLOR_LIGHTS;
+              ctx.shadowBlur = 10;
+              ctx.strokeStyle = '#ffffff';
+              ctx.lineWidth = 2;
+              ctx.stroke();
+          }
+
+          // Body
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = ALIEN_CONFIG.COLOR_BODY;
+          ctx.fillStyle = '#000000';
+          ctx.strokeStyle = ALIEN_CONFIG.COLOR_BODY;
+          ctx.lineWidth = 2;
+
+          // Dome
+          ctx.beginPath();
+          ctx.arc(0, -5, 15, Math.PI, 0);
+          ctx.stroke();
+          ctx.fillStyle = ALIEN_CONFIG.COLOR_BODY;
+          ctx.globalAlpha = 0.3;
+          ctx.fill();
+          ctx.globalAlpha = 1.0;
+
+          // Saucer Ring
+          ctx.beginPath();
+          ctx.ellipse(0, 5, 30, 10, 0, 0, Math.PI*2);
+          ctx.stroke();
+          ctx.fillStyle = '#000';
+          ctx.fill();
+
+          // Lights
+          const lights = 5;
+          ctx.fillStyle = ALIEN_CONFIG.COLOR_LIGHTS;
+          ctx.shadowColor = ALIEN_CONFIG.COLOR_LIGHTS;
+          for(let i=0; i<lights; i++) {
+              const la = (i/lights) * Math.PI * 2 + alien.wobbleAngle;
+              const lx = Math.cos(la) * 25;
+              const ly = Math.sin(la) * 8 + 5;
+              ctx.beginPath();
+              ctx.arc(lx, ly, 2, 0, Math.PI*2);
+              ctx.fill();
+          }
+
+          // Alien HP Bar
+          if (alien.hp < alien.maxHp) {
+            const barW = 40;
+            const barH = 4;
+            const barX = -20;
+            const barY = -30;
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(barX, barY, barW, barH);
+            const pct = Math.max(0, alien.hp / alien.maxHp);
+            ctx.fillStyle = '#ef4444';
+            ctx.fillRect(barX, barY, barW * pct, barH);
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(barX, barY, barW, barH);
+          }
+          
+          ctx.restore();
+      }
+
       // Draw Loot
       lootRef.current.forEach(loot => {
           const color = MINERAL_COLORS[loot.type];
           ctx.fillStyle = color;
           ctx.shadowColor = color;
           ctx.shadowBlur = 15;
-          
-          // Draw Element Shape
           ctx.save();
           ctx.translate(loot.x, loot.y);
-          
-          // Shape based on type for visual variety
           ctx.beginPath();
           if (loot.type === MineralType.IRON) {
-              // Square
               ctx.fillRect(-4, -4, 8, 8);
           } else if (loot.type === MineralType.SILICON) {
-              // Triangle
               ctx.moveTo(0, -6); ctx.lineTo(6, 6); ctx.lineTo(-6, 6); ctx.fill();
           } else if (loot.type === MineralType.GOLD) {
-              // Diamond
               ctx.moveTo(0, -6); ctx.lineTo(6, 0); ctx.lineTo(0, 6); ctx.lineTo(-6, 0); ctx.fill();
           } else {
-              // Hexagon (Kronos)
               for(let i=0; i<6; i++) {
                   const ang = i * Math.PI/3;
                   const lx = Math.cos(ang)*5;
@@ -645,14 +860,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
               }
               ctx.fill();
           }
-          
-          // Text Label
           ctx.shadowBlur = 0;
           ctx.fillStyle = '#ffffff';
           ctx.font = '10px monospace';
           ctx.textAlign = 'center';
           ctx.fillText(`${loot.type} [${loot.amount}]`, 0, -12);
-          
           ctx.restore();
       });
 
@@ -661,12 +873,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           p.x += p.vx;
           p.y += p.vy;
           p.life--;
-          
           ctx.fillStyle = p.color;
           ctx.globalAlpha = p.life / p.maxLife;
-          
           if (p.text) {
-              // Text Particle (Floating Text)
               ctx.font = '12px monospace';
               ctx.textAlign = 'center';
               ctx.shadowColor = 'black';
@@ -674,142 +883,99 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
               ctx.fillText(p.text, p.x, p.y);
               ctx.shadowBlur = 0;
           } else {
-              // Standard Shape Particle
               ctx.fillRect(p.x, p.y, p.size, p.size);
           }
       });
       particlesRef.current = particlesRef.current.filter(p => p.life > 0);
       ctx.globalAlpha = 1.0;
 
-
-      // Draw Mining Laser
-      if (miningTarget) {
+      // Draw Mining Laser (Player)
+      if (miningTarget || attackingAlien) {
           ctx.shadowBlur = 15;
           ctx.shadowColor = '#00ffff';
           ctx.strokeStyle = '#00ffff';
           ctx.lineWidth = 2 + Math.random() * 2;
           
-          // Laser start point (Nose of ship)
           const noseOffset = 30;
           const lx = ship.position.x + Math.cos(ship.rotation) * noseOffset;
           const ly = ship.position.y + Math.sin(ship.rotation) * noseOffset;
 
+          const targetX = miningTarget ? miningTarget.x : (alienRef.current?.x || 0);
+          const targetY = miningTarget ? miningTarget.y : (alienRef.current?.y || 0);
+
           ctx.beginPath();
           ctx.moveTo(lx, ly);
-          ctx.lineTo(miningTarget.x, miningTarget.y);
+          ctx.lineTo(targetX, targetY);
           ctx.stroke();
           
-          // Source flare
           ctx.beginPath();
           ctx.arc(lx, ly, 5, 0, Math.PI*2);
           ctx.fillStyle = '#fff';
           ctx.fill();
       }
 
-
       // Draw Ship
       ctx.translate(ship.position.x, ship.position.y);
       ctx.rotate(ship.rotation);
-      
       ctx.shadowColor = '#00ff00';
       ctx.shadowBlur = 10;
-      ctx.strokeStyle = '#ffffff'; // Main Hull
+      ctx.strokeStyle = '#ffffff'; 
       ctx.lineWidth = 2;
       
-      // --- Retro Rocket Design ---
-      
-      // 1. Main Body (Elongated Cylinder)
+      // Ship Body
       ctx.beginPath();
-      // Top edge
-      ctx.moveTo(-10, -6);
-      ctx.lineTo(10, -6);
-      // Bottom edge
-      ctx.moveTo(-10, 6);
-      ctx.lineTo(10, 6);
+      ctx.moveTo(-10, -6); ctx.lineTo(10, -6);
+      ctx.moveTo(-10, 6); ctx.lineTo(10, 6);
       ctx.stroke();
       
-      // 2. Nose Cone (Pointy, delineated)
+      // Nose
       ctx.beginPath();
       ctx.moveTo(10, -6);
-      // Curve to a sharp point
       ctx.quadraticCurveTo(25, 0, 30, 0);
       ctx.quadraticCurveTo(25, 0, 10, 6);
-      // Delineation line
-      ctx.moveTo(10, -6);
-      ctx.lineTo(10, 6);
+      ctx.moveTo(10, -6); ctx.lineTo(10, 6);
       ctx.stroke();
       
-      // 3. Aft Section / Thrust Cone
+      // Engine
       ctx.beginPath();
-      ctx.moveTo(-10, -6);
-      ctx.lineTo(-20, -10); // Flared bell top
-      ctx.lineTo(-20, 10);  // Flared bell bottom
-      ctx.lineTo(-10, 6);
-      // Delineation line
-      ctx.moveTo(-10, -6);
-      ctx.lineTo(-10, 6);
-      // Engine grating/detail
-      ctx.moveTo(-20, -10);
-      ctx.lineTo(-20, 10);
+      ctx.moveTo(-10, -6); ctx.lineTo(-20, -10); ctx.lineTo(-20, 10); ctx.lineTo(-10, 6);
+      ctx.moveTo(-10, -6); ctx.lineTo(-10, 6);
+      ctx.moveTo(-20, -10); ctx.lineTo(-20, 10);
       ctx.stroke();
 
-      // 4. Fins (Swept back wings)
+      // Fins
       ctx.beginPath();
-      // Top Wing
-      ctx.moveTo(-5, -6);
-      ctx.lineTo(-15, -18); // Wing tip
-      ctx.lineTo(-5, -10); // Trailing edge connection? Or just back to body
-      ctx.lineTo(0, -6);
-      // Bottom Wing
-      ctx.moveTo(-5, 6);
-      ctx.lineTo(-15, 18);
-      ctx.lineTo(-5, 10);
-      ctx.lineTo(0, 6);
+      ctx.moveTo(-5, -6); ctx.lineTo(-15, -18); ctx.lineTo(-5, -10); ctx.lineTo(0, -6);
+      ctx.moveTo(-5, 6); ctx.lineTo(-15, 18); ctx.lineTo(-5, 10); ctx.lineTo(0, 6);
       ctx.stroke();
       
-      // 5. Portholes (Little circles)
-      ctx.fillStyle = '#000'; // Mask background
-      // Center porthole
+      // Portholes
+      ctx.fillStyle = '#000';
       ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-      // Front porthole
       ctx.beginPath(); ctx.arc(6, 0, 2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-      // Rear porthole
       ctx.beginPath(); ctx.arc(-6, 0, 2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-      
-      // Add "Glass" glow to portholes
-      ctx.fillStyle = '#aaffaa';
-      ctx.globalAlpha = 0.6;
+      ctx.fillStyle = '#aaffaa'; ctx.globalAlpha = 0.6;
       ctx.beginPath(); ctx.arc(0, 0, 1.5, 0, Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.arc(6, 0, 1, 0, Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.arc(-6, 0, 1, 0, Math.PI*2); ctx.fill();
       ctx.globalAlpha = 1.0;
 
-      // Engine flare (if thrusting)
+      // Engine Exhaust
       if (isThrusting) {
           ctx.strokeStyle = '#fbbf24';
           ctx.lineWidth = 3;
           ctx.shadowColor = '#fbbf24';
           ctx.shadowBlur = 15;
           ctx.beginPath();
-          // Main jet
-          ctx.moveTo(-22, 0); // Start inside bell
-          ctx.lineTo(-45 - Math.random()*15, 0);
-          
-          // Side jets
-          ctx.moveTo(-21, -4);
-          ctx.lineTo(-35 - Math.random()*10, -6);
-          ctx.moveTo(-21, 4);
-          ctx.lineTo(-35 - Math.random()*10, 6);
-          
+          ctx.moveTo(-22, 0); ctx.lineTo(-45 - Math.random()*15, 0);
+          ctx.moveTo(-21, -4); ctx.lineTo(-35 - Math.random()*10, -6);
+          ctx.moveTo(-21, 4); ctx.lineTo(-35 - Math.random()*10, 6);
           ctx.stroke();
       }
+      ctx.restore();
 
-      ctx.restore(); // End world space
 
-
-      // --- HUD (On Canvas for style) ---
-      
-      // 1. Radar (Bottom Right)
+      // --- HUD ---
       const radarSize = 100;
       const radarX = width - radarSize - 20;
       const radarY = height - radarSize - 20;
@@ -818,21 +984,19 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       ctx.strokeStyle = '#00ff00';
       ctx.lineWidth = 2;
       ctx.shadowBlur = 0;
-      
       ctx.beginPath();
       ctx.arc(radarX, radarY, radarSize, 0, Math.PI*2);
       ctx.fill();
       ctx.stroke();
 
       // Radar Blips
-      const radarScale = radarSize / 2000; // 2000 unit range
+      const radarScale = radarSize / 2000;
       asteroidsRef.current.forEach(ast => {
           const dx = ast.x - ship.position.x;
           const dy = ast.y - ship.position.y;
           if (dx*dx + dy*dy < (2000*2000)) {
               const rx = radarX + dx * radarScale;
               const ry = radarY + dy * radarScale;
-              // Clip to circle
               const dist = Math.sqrt((rx-radarX)**2 + (ry-radarY)**2);
               if (dist < radarSize) {
                   ctx.fillStyle = MINERAL_COLORS[ast.type];
@@ -840,7 +1004,22 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
               }
           }
       });
-      // Station Blip
+      // Alien Blip
+      if (alienRef.current) {
+          const dx = alienRef.current.x - ship.position.x;
+          const dy = alienRef.current.y - ship.position.y;
+          if (dx*dx + dy*dy < (2000*2000)) {
+              const rx = radarX + dx * radarScale;
+              const ry = radarY + dy * radarScale;
+              const dist = Math.sqrt((rx-radarX)**2 + (ry-radarY)**2);
+              if (dist < radarSize) {
+                  ctx.fillStyle = '#a855f7'; // Purple blip
+                  ctx.fillRect(rx-2, ry-2, 4, 4);
+              }
+          }
+      }
+
+      // Station/Player Blip
       const stationDx = STATION_POSITION.x - ship.position.x;
       const stationDy = STATION_POSITION.y - ship.position.y;
       const sRx = radarX + stationDx * radarScale;
@@ -849,11 +1028,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           ctx.fillStyle = '#00ff00';
           ctx.fillRect(sRx-3, sRy-3, 6, 6);
       }
-      // Player Blip
       ctx.fillStyle = '#fff';
       ctx.fillRect(radarX-1, radarY-1, 3, 3);
 
-      // 2. Fuel Gauge (Bottom Left)
+      // Gauges
       const fuelPct = ship.currentFuel / ship.shipConfig.maxFuel;
       ctx.fillStyle = '#001100';
       ctx.strokeStyle = fuelPct < 0.2 ? '#ff0000' : '#00ff00';
@@ -862,16 +1040,13 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       ctx.strokeRect(20, height - 40, 200, 20);
       ctx.fillStyle = fuelPct < 0.2 ? '#ff0000' : '#00ff00';
       ctx.fillRect(22, height - 38, 196 * fuelPct, 16);
-      
       ctx.font = '16px monospace';
       ctx.fillStyle = '#00ff00';
       ctx.fillText(`FUEL: ${Math.floor(ship.currentFuel)}`, 20, height - 45);
-
-      // 3. Cargo (Bottom Left, above fuel)
+      
       const currentCargo = Object.values(ship.cargo).reduce((a,b) => a+b, 0);
       ctx.fillText(`CARGO: ${Math.floor(currentCargo)} / ${ship.shipConfig.maxCargo}`, 20, height - 70);
 
-      // 4. Docking Indicator
       if (distToStation < DOCKING_RANGE) {
           ctx.textAlign = 'center';
           ctx.fillStyle = '#ffffff';
@@ -885,7 +1060,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
 
     animationFrameId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [gameState, onDock, onGameOver, dimensions]); // Added dimensions to dependency
+  }, [gameState, onDock, onGameOver, dimensions]); 
 
   return (
     <canvas 

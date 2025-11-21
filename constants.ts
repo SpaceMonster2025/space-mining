@@ -24,6 +24,16 @@ export const INITIAL_SHIP_CONFIG: ShipConfig = {
   miningRange: 350,
 };
 
+export const ALIEN_CONFIG = {
+  SPAWN_RATE: 0.001, // ~Once every 16 seconds roughly
+  HP: 300,
+  SPEED: 3.0,
+  DRAIN_RANGE: 300,
+  DRAIN_INTERVAL: 45, // Frames between cargo steals
+  COLOR_BODY: '#a855f7', // Purple
+  COLOR_LIGHTS: '#22c55e', // Green
+};
+
 export const MINERAL_VALUES: Record<MineralType, number> = {
   [MineralType.IRON]: 10,
   [MineralType.SILICON]: 25,

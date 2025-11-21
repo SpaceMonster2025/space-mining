@@ -12,6 +12,10 @@ export class SoundManager {
   laserGain: GainNode | null = null;
   laserLfo: OscillatorNode | null = null;
 
+  // Alien
+  alienHumOsc: OscillatorNode | null = null;
+  alienHumGain: GainNode | null = null;
+
   private initialized: boolean = false;
 
   constructor() {
@@ -143,6 +147,70 @@ export class SoundManager {
         this.laserGain = null;
         this.laserLfo = null;
     }
+  }
+
+  startAlienHum() {
+    if (!this.initialized) this.resume();
+    if (this.alienHumGain) return;
+
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = 400;
+
+    // LFO for tremolo/warble
+    const lfo = this.ctx.createOscillator();
+    lfo.type = 'triangle';
+    lfo.frequency.value = 10;
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.value = 50;
+
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0;
+    gain.gain.setTargetAtTime(0.1, this.ctx.currentTime, 0.5);
+
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    lfo.start();
+    osc.start();
+
+    this.alienHumOsc = osc;
+    this.alienHumGain = gain;
+  }
+
+  stopAlienHum() {
+    if (this.alienHumGain) {
+        this.alienHumGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.5);
+        const oldOsc = this.alienHumOsc;
+        const oldGain = this.alienHumGain;
+        setTimeout(() => {
+            oldOsc?.stop();
+            oldOsc?.disconnect();
+            oldGain?.disconnect();
+        }, 500);
+        this.alienHumOsc = null;
+        this.alienHumGain = null;
+    }
+  }
+
+  playAlienZap() {
+    if (!this.initialized) this.resume();
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(800, t);
+    osc.frequency.linearRampToValueAtTime(200, t + 0.1);
+    
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.1, t);
+    gain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+    
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start();
+    osc.stop(t + 0.1);
   }
 
   playExplosion() {
