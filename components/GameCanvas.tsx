@@ -36,6 +36,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
   const mouseRef = useRef<{ x: number, y: number, isDown: boolean }>({ x: 0, y: 0, isDown: false });
   const particlesRef = useRef<Particle[]>([]);
   const lootRef = useRef<Loot[]>([]);
+  const shakeRef = useRef(0); // Screen shake intensity
   
   // Camera position (centered on ship usually, but smoothed)
   const cameraRef = useRef({ x: 0, y: 0 });
@@ -59,6 +60,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
     shipRef.current = initialPlayerState;
     lootRef.current = [];
     particlesRef.current = [];
+    shakeRef.current = 0;
     
     // Init Audio
     soundManagerRef.current = new SoundManager();
@@ -209,6 +211,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
 
       // 1. Physics & Logic
       
+      // Shake Decay
+      if (shakeRef.current > 0) {
+        shakeRef.current *= 0.9;
+        if (shakeRef.current < 0.5) shakeRef.current = 0;
+      }
+
       // Rotation (A/D or Left/Right)
       if (keysRef.current['KeyA'] || keysRef.current['ArrowLeft']) ship.rotation -= ship.shipConfig.rotationSpeed;
       if (keysRef.current['KeyD'] || keysRef.current['ArrowRight']) ship.rotation += ship.shipConfig.rotationSpeed;
@@ -305,6 +313,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
           // Play Laser Sound
           soundManagerRef.current?.startLaser();
 
+          // Apply continuous small shake while mining
+          shakeRef.current = Math.max(shakeRef.current, 2);
+
           // Spawn laser hit particles
           if (Math.random() > 0.5) {
              particlesRef.current.push({
@@ -324,6 +335,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
               
               // Play Explosion
               soundManagerRef.current?.playExplosion();
+              
+              // Trigger big shake
+              shakeRef.current = 15;
               
               const lootAmount = Math.floor(miningTarget.radius / 5); 
               
@@ -447,8 +461,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       ctx.fillStyle = '#050505';
       ctx.fillRect(0, 0, width, height);
 
+      // Apply Shake to Camera
+      const shakeX = (Math.random() - 0.5) * shakeRef.current;
+      const shakeY = (Math.random() - 0.5) * shakeRef.current;
+
       ctx.save();
-      ctx.translate(-cameraRef.current.x, -cameraRef.current.y);
+      ctx.translate(-(cameraRef.current.x + shakeX), -(cameraRef.current.y + shakeY));
 
       // 0. Draw Deep Background (Nebulas)
       nebulasRef.current.forEach(neb => {
