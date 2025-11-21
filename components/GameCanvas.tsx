@@ -38,8 +38,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
   // Camera position (centered on ship usually, but smoothed)
   const cameraRef = useRef({ x: 0, y: 0 });
 
-  // Stars for parallax
+  // Background Elements
   const starsRef = useRef<{x: number, y: number, size: number, depth: number}[]>([]);
+  const nebulasRef = useRef<{x: number, y: number, size: number, color: string, depth: number}[]>([]);
+  const galaxiesRef = useRef<{x: number, y: number, size: number, rotation: number, color: string, depth: number}[]>([]);
 
   // --- Resize Listener ---
   useEffect(() => {
@@ -58,15 +60,43 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
     
     // Generate Stars
     const stars = [];
-    for(let i=0; i<200; i++) {
+    for(let i=0; i<800; i++) {
       stars.push({
-        x: (Math.random() - 0.5) * WORLD_BOUNDS, // Use world bounds for stars, not screen
-        y: (Math.random() - 0.5) * WORLD_BOUNDS,
+        x: (Math.random() - 0.5) * WORLD_BOUNDS * 1.5, // Widen the field
+        y: (Math.random() - 0.5) * WORLD_BOUNDS * 1.5,
         size: Math.random() * 2,
-        depth: 0.2 + Math.random() * 0.8
+        depth: 0.1 + Math.random() * 0.9 // Varying depth for parallax
       });
     }
     starsRef.current = stars;
+
+    // Generate Nebulas (Faint colored clouds)
+    const nebulas = [];
+    for (let i = 0; i < 15; i++) {
+        const colorBase = Math.random() > 0.5 ? '76, 29, 149' : '13, 148, 136'; // Violet or Teal
+        nebulas.push({
+            x: (Math.random() - 0.5) * WORLD_BOUNDS * 1.2,
+            y: (Math.random() - 0.5) * WORLD_BOUNDS * 1.2,
+            size: 600 + Math.random() * 800,
+            color: `rgba(${colorBase}, 0.08)`,
+            depth: 0.05 // Very distant
+        });
+    }
+    nebulasRef.current = nebulas;
+
+    // Generate Galaxies (Vector Spirals)
+    const galaxies = [];
+    for (let i = 0; i < 8; i++) {
+        galaxies.push({
+            x: (Math.random() - 0.5) * WORLD_BOUNDS * 1.2,
+            y: (Math.random() - 0.5) * WORLD_BOUNDS * 1.2,
+            size: 150 + Math.random() * 200,
+            rotation: Math.random() * Math.PI * 2,
+            color: Math.random() > 0.5 ? '#8b5cf6' : '#3b82f6', // Violet or Blue
+            depth: 0.02 // Extremely distant
+        });
+    }
+    galaxiesRef.current = galaxies;
 
     // Generate Asteroids
     const asteroids: Asteroid[] = [];
@@ -382,17 +412,70 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
       ctx.save();
       ctx.translate(-cameraRef.current.x, -cameraRef.current.y);
 
-      // Draw Stars (Parallax)
-      ctx.fillStyle = '#ffffff';
-      starsRef.current.forEach(star => {
-          // Parallax: Move stars slightly based on camera
-          const px = star.x + (cameraRef.current.x * (1 - star.depth));
-          const py = star.y + (cameraRef.current.y * (1 - star.depth));
-          
-          // Simplified: just draw fixed stars relative to world for now to avoid complex wrapping logic bugs
-          ctx.globalAlpha = Math.random() * 0.8 + 0.2;
+      // 0. Draw Deep Background (Nebulas)
+      nebulasRef.current.forEach(neb => {
+        // Deepest parallax
+        const px = neb.x + (cameraRef.current.x * neb.depth);
+        const py = neb.y + (cameraRef.current.y * neb.depth);
+
+        const gradient = ctx.createRadialGradient(px, py, 0, px, py, neb.size);
+        gradient.addColorStop(0, neb.color);
+        gradient.addColorStop(1, 'rgba(0,0,0,0)');
+        
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(px, py, neb.size, 0, Math.PI*2);
+        ctx.fill();
+      });
+
+      // 0.5 Draw Distant Galaxies
+      galaxiesRef.current.forEach(gal => {
+        const px = gal.x + (cameraRef.current.x * gal.depth);
+        const py = gal.y + (cameraRef.current.y * gal.depth);
+
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(gal.rotation);
+        ctx.strokeStyle = gal.color;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.3; // Faint
+
+        // Draw simple wireframe spirals
+        for(let arm = 0; arm < 2; arm++) {
+          ctx.rotate(Math.PI); // Rotate 180 for next arm
           ctx.beginPath();
-          ctx.arc(star.x, star.y, star.size, 0, Math.PI*2);
+          for(let t = 0; t < 20; t++) {
+            const r = t * (gal.size / 20);
+            const theta = t * 0.5;
+            const lx = r * Math.cos(theta);
+            const ly = r * Math.sin(theta);
+            if (t===0) ctx.moveTo(lx, ly);
+            else ctx.lineTo(lx, ly);
+          }
+          ctx.stroke();
+        }
+        
+        ctx.restore();
+      });
+      ctx.globalAlpha = 1.0;
+
+      // 1. Draw Stars (Parallax)
+      starsRef.current.forEach(star => {
+          // Parallax: Move stars based on depth
+          // Depth 0 = moves with camera (foreground), Depth 1 = fixed in space (bg)
+          // Here we used depth as "distance factor", so 1 is close? 
+          // Actually previous implementation: px = star.x + (cam.x * (1-depth))
+          // If depth is small (0.1), 1-depth is 0.9, moves a lot -> foreground?
+          // Let's stick to: star.x is world position.
+          
+          const factor = (1 - star.depth); // how much it follows camera. 0 = locked to world.
+          const px = star.x + (cameraRef.current.x * factor);
+          const py = star.y + (cameraRef.current.y * factor);
+          
+          ctx.globalAlpha = Math.random() * 0.5 + 0.3;
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(px, py, star.size, 0, Math.PI*2);
           ctx.fill();
       });
       ctx.globalAlpha = 1.0;
@@ -766,3 +849,4 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({ gameState, onDock, onGam
     />
   );
 };
+    
